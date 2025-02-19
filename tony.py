@@ -1,5 +1,4 @@
 #Tushar Nain - V1.2
-
 import streamlit as st
 from youtube_transcript_api import YouTubeTranscriptApi
 from urllib.parse import urlparse, parse_qs
@@ -70,7 +69,7 @@ def main():
 
     video_urls_input = st.text_area("Enter YouTube Video URLs (one per line):",
                                       placeholder="https://www.youtube.com/watch?v=dQw4w9WgXcQ\nhttps://www.youtube.com/watch?v=another_video_id")
-    filenames_input = st.text_area("Enter Desired Filenames (one per line, corresponding to URLs - optional [Layer_Interview Bucket_Company]):",
+    filenames_input = st.text_area("Enter Desired Filenames (one per line, corresponding to URLs - optional):",
                                      placeholder="video1_name\nvideo2_name")
 
     if st.button("Extract and Download Transcripts"):
