@@ -1,13 +1,15 @@
-#Tushar Nain - V1.2
 import streamlit as st
 from youtube_transcript_api import YouTubeTranscriptApi
 from urllib.parse import urlparse, parse_qs
 import zipfile
 import io
-import re
+import re  # For sanitizing filenames
+
 
 def extract_video_id(video_url):
-    """Extracts the video ID from a YouTube video URL."""
+    """
+    Extracts the video ID from a YouTube video URL.
+    """
     try:
         parsed_url = urlparse(video_url)
         if parsed_url.netloc not in ['www.youtube.com', 'youtube.com', 'm.youtube.com', 'youtu.be']:
@@ -23,40 +25,50 @@ def extract_video_id(video_url):
     except Exception:
         return None
 
-def get_youtube_transcript(video_url):
-    """Extracts the English transcript from a YouTube video."""
+
+def get_youtube_transcript(video_url): # Removed output_filename as filenames are handled later
+    """
+    Extracts the English transcript from a YouTube video.
+    Returns: tuple: (bool, str, str) - Success, transcript text, video ID (for error messages)
+    """
     video_id = extract_video_id(video_url)
     if not video_id:
-        error_message = f"Error: Could not extract video ID from URL: '{video_url}'"
+        error_message = f"Error: Could not extract video ID from the provided URL: '{video_url}'"
         st.error(error_message)
         return False, error_message, video_id
+
     try:
         transcript = YouTubeTranscriptApi.get_transcript(video_id)
         transcript_text = ""
         for segment in transcript:
             transcript_text += segment['text'] + " "
         return True, transcript_text, video_id
+
     except Exception as e:
         error_message = f"Error extracting transcript for video ID: '{video_id}': {e}"
         st.error(error_message)
         return False, error_message, video_id
 
+
 def sanitize_filename(filename):
-    """Sanitizes a filename by removing invalid characters."""
+    """
+    Sanitizes a filename by removing or replacing invalid characters.
+    """
     filename = filename.strip()
-    filename = re.sub(r'[\\/*?:"<>|]', '', filename)
-    filename = filename.replace(" ", "_")
+    filename = re.sub(r'[\\/*?:"<>|]', '', filename)  # Remove or replace invalid characters
+    filename = filename.replace(" ", "_") # Replace spaces with underscores
     if not filename:
-        filename = "transcript_file"
+        filename = "transcript_file" # Default if filename becomes empty after sanitization
     return filename
+
 
 def main():
     st.title("YouTube Transcript Extractor")
-    st.markdown("Enter YouTube video URLs and filenames (optional) to extract transcripts.")
+    st.markdown("Enter YouTube video URLs and desired filenames (optional) to extract transcripts.")
 
-    video_urls_input = st.text_area("YouTube Video URLs (one per line):",
+    video_urls_input = st.text_area("Enter YouTube Video URLs (one per line):",
                                       placeholder="https://www.youtube.com/watch?v=dQw4w9WgXcQ\nhttps://www.youtube.com/watch?v=another_video_id")
-    filenames_input = st.text_area("Desired Filenames (one per line, optional):",
+    filenames_input = st.text_area("Enter Desired Filenames (one per line, corresponding to URLs - optional):",
                                      placeholder="video1_name\nvideo2_name")
 
     if st.button("Extract and Download Transcripts"):
@@ -66,17 +78,18 @@ def main():
         if not video_urls:
             st.warning("Please enter at least one YouTube video URL.")
         else:
-            transcripts_data = []
+            transcripts_data = [] # List to store (filename, transcript_text) tuples
+
             for i, video_url in enumerate(video_urls):
                 default_filename = f"transcript_{i+1}.txt"
                 output_filename_base = filenames[i] if i < len(filenames) and filenames[i] else default_filename
                 output_filename_base_sanitized = sanitize_filename(output_filename_base)
-                output_filename = f"{output_filename_base_sanitized}_{i+1}.txt"
+                output_filename = f"{output_filename_base_sanitized}_{i+1}.txt" # Append index for uniqueness
 
                 with st.spinner(f"Extracting transcript for: {video_url}"):
-                    success, transcript_text, video_id = get_youtube_transcript(video_url)
+                    success, transcript_text, video_id = get_youtube_transcript(video_url) # Removed output_filename argument
                     if success:
-                        transcripts_data.append((output_filename, transcript_text))
+                        transcripts_data.append((output_filename, transcript_text)) # Store data for Download All
                         st.markdown(f"**Transcript for Video {i+1}: {video_url}** (saved as `{output_filename}`)")
                         st.code(transcript_text[:500] + "..." if len(transcript_text) > 500 else transcript_text, language=None)
                         st.download_button(
@@ -87,12 +100,13 @@ def main():
                         )
                         st.write("-" * 30)
 
-            if transcripts_data:
+            if transcripts_data: # If at least one transcript was extracted
+                # Create Download All button
                 zip_buffer = io.BytesIO()
                 with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
                     for filename, transcript_text in transcripts_data:
                         zip_file.writestr(filename, transcript_text)
-                zip_buffer.seek(0)
+                zip_buffer.seek(0) # Reset buffer to beginning for download
 
                 st.download_button(
                     label="Download All Transcripts as ZIP",
@@ -100,6 +114,7 @@ def main():
                     file_name="transcripts.zip",
                     mime="application/zip"
                 )
+
 
 if __name__ == "__main__":
     main()
