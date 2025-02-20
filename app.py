@@ -11,39 +11,36 @@ import math  # Import the math module
 
 
 def extract_video_id(url):
-    """Extract YouTube video ID from various URL formats"""
+    """Extract YouTube video ID from various URL formats, including youtu.be and handling query parameters."""
     if not url:
         return None
 
     url = url.strip()
+    parsed_url = urlparse(url)
 
-    # Handle youtu.be short links
-    parsed_url = urlparse(url)  # parse even short links
     if 'youtu.be' in parsed_url.netloc:
-        # Remove the leading '/' from the path
+        # Handle youtu.be short links
         path = parsed_url.path.lstrip('/')
-        # Split path by any remaining '/' (in case of unexpected slashes)
-        video_id = path.split('/')[0]  # Take the first segment as the ID
+        video_id = path.split('?')[0]  # Split on '?' and take the first part
+        video_id = video_id.split('/')[0] #Take first part incase there is any '/'
         return video_id
 
-    # Handle youtube.com links
-    if 'youtube.com' in parsed_url.netloc:
+    elif 'youtube.com' in parsed_url.netloc:
+        # Handle youtube.com links
         if '/watch' in parsed_url.path:
-            query = parse_qs(parsed_url.query)
-            return query.get('v', [None])[0]
-        elif '/embed/' in parsed_url.path or '/v/' in parsed_url.path:
+            query_params = parse_qs(parsed_url.query)
+            return query_params.get('v', [None])[0]
+        elif '/embed/' in parsed_url.path or '/v/' in parsed_url.path or '/live/' in parsed_url.path:
+            path_parts = parsed_url.path.split('/')
+            # Find the video ID, handling different path structures
+            for part in reversed(path_parts):  # Iterate in reverse
+                if part:  # Check for non-empty parts
+                    return part
+        elif 'shorts' in parsed_url.path:
             path_parts = parsed_url.path.split('/')
             return path_parts[-1]
-        # ADD THIS BLOCK FOR /live/ URLs:
-        elif '/live/' in parsed_url.path:
-            path_parts = parsed_url.path.split('/')
-            # Find the index of 'live' and get the next part
-            try:
-                live_index = path_parts.index('live')
-                return path_parts[live_index + 1]
-            except (ValueError, IndexError):  # Handle cases where 'live' is last or missing
-                return None
     return None
+
 
 
 def get_captions_from_pytube(video_id):
@@ -312,24 +309,4 @@ def main():
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
                 for file_name, content, _ in chunk:
-                    zip_file.writestr(file_name, content)
-            zip_buffer.seek(0)
-
-            st.download_button(
-                label=f"Download Transcripts (Part {i + 1} of {num_chunks})",
-                data=zip_buffer,
-                file_name=f"youtube_transcripts_part_{i + 1}.zip",
-                mime="application/zip",
-                key=f"download_all_part_{i}"  # Unique key for each chunk
-            )
-
-    # --- (Troubleshooting section remains unchanged) ---
-    if fail_count > 0:
-        st.markdown("""
-        ## Troubleshooting
-
-        ... (rest of the troubleshooting section) ...
-        """)
-
-if __name__ == '__main__':
-    main()
+                    zip
