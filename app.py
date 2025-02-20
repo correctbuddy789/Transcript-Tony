@@ -196,4 +196,30 @@ def main():
 
     with st.expander("Advanced Options"):
         extraction_method = st.radio(
-            "
+            "Extraction Method",
+            ["Auto (try all methods)", "PyTube", "Direct API Access"],
+            index=0
+        )
+
+    success_count = 0  # Initialize outside the if block
+    fail_count = 0  # Initialize outside the if block
+
+    if st.button("Extract Transcripts"):
+        if not url_input.strip():
+            st.warning("Please enter at least one YouTube URL.")
+            return
+
+        # --- Prevent Duplicate URLs ---
+        urls = []
+        for url in url_input.strip().split('\n'):
+            url = url.strip()
+            if url and url not in urls:  # Check for duplicates
+                urls.append(url)
+        # ------------------------------
+        names = [name.strip() for name in name_input.strip().split('\n') if name.strip()]
+
+        st.info(f"Processing {len(urls)} video(s)...")
+
+        # --- Correct Session State Handling ---
+        if 'results' not in st.session_state:
+            st.session_state.results = []
