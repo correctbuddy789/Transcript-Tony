@@ -8,6 +8,7 @@ import requests
 import json
 import zipfile
 import math
+import time
 
 
 def extract_video_id(url):
@@ -78,24 +79,32 @@ def get_captions_from_pytube(video_id):
 
 
 def get_captions_from_api(video_id):
-    """Try to get captions using direct API access"""
-    try:
-        # First try to get a list of available caption tracks
-        session = requests.Session()
-        video_url = f"https://www.youtube.com/watch?v={video_id}"
-        response = session.get(video_url)
+    """Try to get captions using direct API access, with retries and headers."""
+    session = requests.Session()
+    # Mimic a browser User-Agent
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',  # Add Accept-Language header
+    })
 
-        if response.status_code != 200:
-            return False, f"Failed to access video page (status code: {response.status_code})"
+    max_retries = 3
+    retry_delay = 1  # Initial delay in seconds
 
-        # Try to extract caption track info from the response
+    for attempt in range(max_retries):
         try:
-            # First check for English auto-generated captions
-            caption_url = f"https://www.youtube.com/api/timedtext?v={video_id}&lang=en"
-            caption_response = session.get(caption_url)
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
+            response = session.get(video_url)
 
+            if response.status_code != 200:
+                return False, f"Failed to access video page (status code: {response.status_code})"
+
+            # Try to extract caption track info from the response
+
+            # First check for English auto-generated captions
+            caption_params = {'v': video_id, 'lang': 'en'}
+            caption_url = f"https://www.youtube.com/api/timedtext"
+            caption_response = session.get(caption_url, params=caption_params)
             if caption_response.status_code == 200 and caption_response.text:
-                # Parse the XML
                 try:
                     root = ET.fromstring(caption_response.text)
                     transcript_text = " ".join([elem.text for elem in root.findall(".//text") if elem.text])
@@ -104,18 +113,19 @@ def get_captions_from_api(video_id):
                 except Exception:
                     pass
 
-            # Try to extract the serializedShareEntity which sometimes contains caption URLs
+
+            # Try to extract from captionTracks or playerCaptionsTracklistRenderer
             data_pattern = r'(?:"captionTracks":(\[.*?\])|"playerCaptionsTracklistRenderer":.*?(\[.*?\]))'
             matches = re.findall(data_pattern, response.text)
-
             caption_data = None
+
             for match_group in matches:
                 for match in match_group:
                     if match:
                         try:
                             caption_data = json.loads(match)
                             break
-                        except:
+                        except (json.JSONDecodeError, TypeError): # More specific exception handling
                             continue
                 if caption_data:
                     break
@@ -123,35 +133,33 @@ def get_captions_from_api(video_id):
             if not caption_data:
                 return False, "No caption data found in video page"
 
-            # Extract the first available caption URL
-            caption_url = None
             for track in caption_data:
                 if "baseUrl" in track:
                     caption_url = track["baseUrl"]
-                    break
+                    # Get the captions
+                    caption_response = session.get(caption_url)
+                    if caption_response.status_code == 200: # No need to check .text here
+                        try:
+                            root = ET.fromstring(caption_response.text)
+                            transcript_text = " ".join([elem.text for elem in root.findall(".//text") if elem.text is not None])
+                            if transcript_text: # check if transcript is not empty
+                                 return True, transcript_text
+                        except ET.ParseError as xml_err:
+                            return False, f"Failed to parse caption XML: {xml_err}"
+            return False, "No suitable caption URL found"
 
-            if not caption_url:
-                return False, "No caption URL found in video data"
+        except requests.RequestException as e:  # Catch network-related errors
+            error_msg = f"Network error: {e}"
+            if attempt < max_retries - 1:
+                st.warning(f"Attempt {attempt + 1} failed: {error_msg}. Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+            else:
+                return False, error_msg
+        except Exception as e: # Catch all other exception
+            return False, f"An unexpected error occurred: {e}"
 
-            # Get the captions
-            caption_response = session.get(caption_url)
-            if caption_response.status_code != 200:
-                return False, f"Failed to get captions (status code: {caption_response.status_code})"
-
-            # Parse the XML
-            try:
-                root = ET.fromstring(caption_response.text)
-                transcript_text = " ".join([elem.text for elem in root.findall(".//text") if elem.text])
-                return True, transcript_text
-            except Exception as xml_err:
-                return False, f"Failed to parse caption XML: {str(xml_err)}"
-
-        except Exception as e:
-            return False, f"API extraction error: {str(e)}"
-
-    except Exception as e:
-        return False, f"General API error: {str(e)}"
-
+    return False, "Max retries exceeded" # Return message if all attempts failed
 
 def sanitize_filename(name):
     """Create a safe filename from any input string"""
@@ -188,149 +196,4 @@ def main():
 
     with st.expander("Advanced Options"):
         extraction_method = st.radio(
-            "Extraction Method",
-            ["Auto (try all methods)", "PyTube", "Direct API Access"],
-            index=0
-        )
-
-    success_count = 0  # Initialize outside the if block
-    fail_count = 0  # Initialize outside the if block
-
-    if st.button("Extract Transcripts"):
-        if not url_input.strip():
-            st.warning("Please enter at least one YouTube URL.")
-            return
-
-        # --- Prevent Duplicate URLs ---
-        urls = []
-        for url in url_input.strip().split('\n'):
-            url = url.strip()
-            if url and url not in urls:  # Check for duplicates
-                urls.append(url)
-        # ------------------------------
-        names = [name.strip() for name in name_input.strip().split('\n') if name.strip()]
-
-        st.info(f"Processing {len(urls)} video(s)...")
-
-        # --- Correct Session State Handling ---
-        if 'results' not in st.session_state:
-            st.session_state.results = []  # Initialize ONLY if it doesn't exist
-        else:
-            st.session_state.results = []  # Clear previous results.
-        # --------------------------------------
-
-        for i, url in enumerate(urls):
-            # Get filename
-            custom_name = names[i] if i < len(names) else f"video_{i+1}"
-            sanitized_name = sanitize_filename(custom_name)
-            filename = f"{sanitized_name}.txt"
-
-            # Extract video ID
-            video_id = extract_video_id(url)
-            if not video_id:
-                st.error(f"❌ Could not extract video ID from URL: {url}")
-                fail_count += 1
-                continue
-
-            st.markdown(f"### Processing: {url}")
-            st.write(f"Video ID: {video_id}")
-
-            # Extract transcript based on selected method
-            success = False
-            transcript = ""
-            error_msg = ""
-
-            if extraction_method in ["Auto (try all methods)", "PyTube"]:
-                st.write("Trying PyTube extraction...")
-                success, result = get_captions_from_pytube(video_id)
-                if success:
-                    transcript = result
-                else:
-                    error_msg = result
-                    if extraction_method == "PyTube":
-                        st.error(f"❌ PyTube extraction failed: {error_msg}")
-
-            if not success and extraction_method in ["Auto (try all methods)", "Direct API Access"]:
-                st.write("Trying Direct API extraction...")
-                success, result = get_captions_from_api(video_id)
-                if success:
-                    transcript = result
-                else:
-                    error_msg = result
-                    if extraction_method == "Direct API Access" or extraction_method == "Auto (try all methods)":
-                        st.error(f"❌ API extraction failed: {error_msg}")
-
-            # Display results
-            if success:
-                try:
-                    success_count += 1
-                    st.success(f"✅ Successfully extracted transcript for {url}")
-                    st.session_state.results.append((filename, transcript, video_id))
-
-                    with st.expander("Preview Transcript"):
-                        st.code(transcript[:1000] + ("..." if len(transcript) > 1000 else ""))
-
-                    st.download_button(
-                        label=f"Download {filename}",
-                        data=transcript,
-                        file_name=filename,
-                        mime="text/plain",
-                        key=f"download_{video_id}_{i}"  # Even more unique key
-                    )
-                except Exception as e:
-                    fail_count += 1
-                    st.error(f"❌ Unexpected error processing {url}: {e}")
-                    st.write("Please check the URL and try again.  This video may have unusual caption data.")
-            else:
-                fail_count += 1
-                st.error(f"❌ Failed to extract transcript for {url}")
-                st.write(f"Reason: {error_msg}")
-
-            st.markdown("---")
-
-        # Summary
-        st.markdown(f"## Summary: {success_count} succeeded, {fail_count} failed")
-
-    # --- Download All (OUTSIDE the loop) ---
-    if st.session_state.get('results'):
-        chunk_size = 25  # Number of transcripts per ZIP file.  Adjust as needed.
-        num_chunks = math.ceil(len(st.session_state.results) / chunk_size)
-
-        for i in range(num_chunks):
-            start_index = i * chunk_size
-            end_index = min((i + 1) * chunk_size, len(st.session_state.results))
-            chunk = st.session_state.results[start_index:end_index]
-
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-                for file_name, content, _ in chunk:
-                    zip_file.writestr(file_name, content)
-            zip_buffer.seek(0)
-
-            st.download_button(
-                label=f"Download Transcripts (Part {i + 1} of {num_chunks})",
-                data=zip_buffer,
-                file_name=f"youtube_transcripts_part_{i + 1}.zip",
-                mime="application/zip",
-                key=f"download_all_part_{i}"  # Unique key for each chunk
-            )
-
-    # --- (Troubleshooting section remains unchanged) ---
-    if fail_count > 0:
-        st.markdown("""
-        ## Troubleshooting
-
-        If transcripts are failing to extract, consider:
-
-        1.  **Privacy Restrictions**: Some videos have disabled captions/transcripts
-        2.  **Regional Restrictions**: Some videos may not be available with captions in your region
-        3.  **Authentication**: When running locally, your browser authentication might allow access to more transcripts
-
-        For reliable extraction of transcripts from videos with restrictions, consider:
-        - Running this app locally (where your browser cookies can be used)
-        - Using third-party services that can download videos with captions
-        """)
-
-
-if __name__ == '__main__':
-    main()
+            "
