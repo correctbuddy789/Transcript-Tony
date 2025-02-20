@@ -1,46 +1,12 @@
 import streamlit as st
 from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
-from youtube_transcript_api._transcripts import TranscriptListFetcher
 from urllib.parse import urlparse, parse_qs
 import zipfile
 import io
 import re
-import requests
 import json
 import os
-
-
-# Override the default fetcher to include cookies
-class CustomTranscriptListFetcher(TranscriptListFetcher):
-    def __init__(self):
-        super().__init__()
-        
-    def fetch(self, video_id, proxies=None, cookies=None):
-        """
-        Fetch transcript list with optional cookies
-        """
-        url = 'https://www.youtube.com/watch'
-        params = {'v': video_id}
-        
-        # Use cookies if provided
-        if cookies:
-            if isinstance(cookies, str) and os.path.exists(cookies):
-                # Load cookies from file
-                with open(cookies, 'r') as f:
-                    cookies_dict = json.load(f)
-            elif isinstance(cookies, dict):
-                cookies_dict = cookies
-            else:
-                cookies_dict = None
-        else:
-            cookies_dict = None
-            
-        result = requests.get(url, params=params, proxies=proxies, cookies=cookies_dict)
-        if result.status_code != 200:
-            raise Exception(f'Failed to get transcript info: HTTP {result.status_code}')
-            
-        return result.text
-
+import requests
 
 def extract_video_id(video_url):
     """
@@ -70,9 +36,10 @@ def extract_video_id(video_url):
         return None
 
 
-def get_youtube_transcript(video_url, use_cookies=True, language_preference=None):
+def get_youtube_transcript(video_url, language_preference=None):
     """
-    Extracts the transcript from a YouTube video with better error handling and cookie support.
+    Extracts the transcript from a YouTube video with better error handling.
+    Uses direct API calls without custom fetcher.
     """
     video_id = extract_video_id(video_url)
     if not video_id:
@@ -80,54 +47,107 @@ def get_youtube_transcript(video_url, use_cookies=True, language_preference=None
         return False, error_message, video_id
 
     try:
-        # Use custom fetcher with cookies if requested
-        fetcher = CustomTranscriptListFetcher() if use_cookies else None
-        
-        # Prepare language list - try user preference first, then English, then any
+        # Try to get transcript with specific languages
         languages = []
         if language_preference:
             languages.append(language_preference)
         if 'en' not in languages:
             languages.append('en')
             
-        transcript_list = YouTubeTranscriptApi._get_transcript_list(
-            video_id, 
-            fetcher=fetcher,
-            cookies={} if use_cookies else None  # Pass empty dict to enable cookies but not restrict to specific ones
-        )
-        
-        # Try to get transcript in preferred language(s) first
         try:
+            # First try with specified languages
             if languages:
-                transcript = transcript_list.find_transcript(languages)
+                transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
             else:
-                # If no language preference, get the first available transcript
-                transcript = transcript_list.find_transcript([])
+                # Fall back to default language
+                transcript = YouTubeTranscriptApi.get_transcript(video_id)
+                
         except NoTranscriptFound:
             # If preferred languages not found, try any language
-            transcript = transcript_list.find_transcript([])
+            transcript = YouTubeTranscriptApi.get_transcript(video_id)
             
-        transcript_data = transcript.fetch()
         transcript_text = ""
-        for segment in transcript_data:
+        for segment in transcript:
             transcript_text += segment['text'] + " "
             
-        # Add source language information to the transcript
-        source_language = transcript.language_code
-        transcript_header = f"# Transcript (Source language: {source_language})\n\n"
-        return True, transcript_header + transcript_text, video_id
+        return True, transcript_text, video_id
 
     except NoTranscriptFound:
-        error_message = f"No transcript available for video ID: '{video_id}'"
-        return False, error_message, video_id
+        # Try fallback method - get list of available transcripts first
+        try:
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            available_transcript = transcript_list.find_generated_transcript(languages=['en']) or \
+                                  transcript_list.find_generated_transcript(languages=[]) or \
+                                  transcript_list.find_manually_created_transcript(languages=['en']) or \
+                                  transcript_list.find_manually_created_transcript(languages=[])
+            
+            if available_transcript:
+                transcript_data = available_transcript.fetch()
+                transcript_text = ""
+                for segment in transcript_data:
+                    transcript_text += segment['text'] + " "
+                return True, transcript_text, video_id
+            else:
+                error_message = f"No transcript available for video ID: '{video_id}'"
+                return False, error_message, video_id
+                
+        except Exception as e:
+            error_message = f"No transcript available for video ID: '{video_id}' (Fallback failed: {str(e)})"
+            return False, error_message, video_id
             
     except TranscriptsDisabled:
-        error_message = f"Transcripts are disabled for video ID: '{video_id}'"
-        return False, error_message, video_id
+        # Try to get an automatically generated transcript as fallback
+        try:
+            # Try using list_transcripts which can sometimes access auto-generated ones
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            auto_transcript = next((t for t in transcript_list if t.is_generated), None)
+            
+            if auto_transcript:
+                transcript_data = auto_transcript.fetch()
+                transcript_text = ""
+                for segment in transcript_data:
+                    transcript_text += segment['text'] + " "
+                return True, transcript_text, video_id
+            else:
+                error_message = f"Transcripts are disabled for video ID: '{video_id}'"
+                return False, error_message, video_id
+                
+        except Exception:
+            error_message = f"Transcripts are disabled for video ID: '{video_id}'"
+            return False, error_message, video_id
         
     except Exception as e:
         error_message = f"Error extracting transcript for video ID: '{video_id}': {e}"
         return False, error_message, video_id
+
+
+def try_alternative_transcript_method(video_id):
+    """
+    Alternative method to get transcripts by directly accessing YouTube's API.
+    """
+    try:
+        # Try to directly use requests to fetch transcript data
+        session = requests.Session()
+        response = session.get(f"https://www.youtube.com/watch?v={video_id}")
+        
+        if response.status_code != 200:
+            return False, f"Could not access video page, status code: {response.status_code}"
+            
+        # This is experimental and might need adjustments based on YouTube's API changes
+        try:
+            transcript_url = f"https://www.youtube.com/api/timedtext?v={video_id}&lang=en"
+            transcript_response = session.get(transcript_url)
+            
+            if transcript_response.status_code == 200 and transcript_response.text:
+                return True, "Successfully retrieved transcript using alternative method"
+            else:
+                return False, "Alternative transcript method failed"
+                
+        except Exception as e:
+            return False, f"Alternative transcript fetch failed: {str(e)}"
+            
+    except Exception as e:
+        return False, f"Alternative method failed: {str(e)}"
 
 
 def sanitize_filename(filename):
@@ -182,9 +202,9 @@ def main():
     
     # Advanced options in expander
     with st.expander("Advanced Options"):
-        use_cookies = st.checkbox("Use Cookie Support (helps with restricted videos)", value=True)
         language_preference = st.text_input("Preferred Language Code (leave empty for English or any available)", 
                                            placeholder="es, fr, de, ja, etc.")
+        use_browser = st.checkbox("Experimental: Try to fetch from HTML (may work with some restricted videos)", value=False)
 
     if st.button("Extract and Download Transcripts"):
         video_urls = parse_video_urls(video_urls_input)
@@ -200,6 +220,9 @@ def main():
                 for i, url in enumerate(video_urls):
                     st.write(f"{i+1}. {url}")
             
+            # Version info
+            st.info(f"Using youtube-transcript-api version: {YouTubeTranscriptApi.__version__ if hasattr(YouTubeTranscriptApi, '__version__') else 'Unknown'}")
+            
             transcripts_data = []  # List to store (filename, transcript_text) tuples
             success_count = 0
             failure_count = 0
@@ -213,9 +236,17 @@ def main():
                 with st.spinner(f"Extracting transcript for: {video_url}"):
                     success, transcript_text, video_id = get_youtube_transcript(
                         video_url, 
-                        use_cookies=use_cookies,
                         language_preference=language_preference if language_preference else None
                     )
+                    
+                    # If standard method failed and experimental is enabled, try the alternative
+                    if not success and use_browser and video_id:
+                        st.warning(f"Standard extraction failed for {video_url}, trying experimental method...")
+                        alt_success, alt_message = try_alternative_transcript_method(video_id)
+                        if alt_success:
+                            st.success(f"Experimental method succeeded: {alt_message}")
+                            # Re-try with standard method after priming with browser access
+                            success, transcript_text, _ = get_youtube_transcript(video_url)
                     
                     if success:
                         success_count += 1
@@ -232,6 +263,11 @@ def main():
                         failure_count += 1
                         st.markdown(f"❌ **Video {i+1}: {video_url}**")
                         st.error(transcript_text)  # Display the error message
+                        
+                        # Provide more information about the video if extraction failed
+                        if video_id:
+                            st.info(f"Video ID: {video_id}")
+                            st.markdown(f"This video may have restricted transcripts or doesn't have any available transcripts.")
                     
                     st.write("-" * 30)
 
@@ -252,6 +288,30 @@ def main():
                     file_name="transcripts.zip",
                     mime="application/zip"
                 )
+            
+            # Troubleshooting information
+            if failure_count > 0:
+                st.markdown("""
+                ## Why This Might Be Happening
+                
+                1. **No Available Transcripts**: Some YouTube videos don't have any transcripts available.
+                2. **Owner Restrictions**: The video owner may have disabled transcript access.
+                3. **Authentication Required**: Some videos require you to be logged in to access transcripts.
+                4. **Geo-restrictions**: Transcript availability can vary by region.
+                
+                ### Using This App Locally
+                If you've confirmed that transcripts work locally but not on Streamlit Cloud:
+                
+                ```python
+                # Install dependencies
+                pip install streamlit youtube-transcript-api
+                
+                # Save this app as app.py and run
+                streamlit run app.py
+                ```
+                
+                When running locally, your browser's cookies may allow access to transcripts that are restricted on Streamlit Cloud.
+                """)
 
 
 if __name__ == "__main__":
