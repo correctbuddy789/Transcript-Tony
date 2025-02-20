@@ -1,9 +1,45 @@
 import streamlit as st
 from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
+from youtube_transcript_api._transcripts import TranscriptListFetcher
 from urllib.parse import urlparse, parse_qs
 import zipfile
 import io
-import re  # For sanitizing filenames
+import re
+import requests
+import json
+import os
+
+
+# Override the default fetcher to include cookies
+class CustomTranscriptListFetcher(TranscriptListFetcher):
+    def __init__(self):
+        super().__init__()
+        
+    def fetch(self, video_id, proxies=None, cookies=None):
+        """
+        Fetch transcript list with optional cookies
+        """
+        url = 'https://www.youtube.com/watch'
+        params = {'v': video_id}
+        
+        # Use cookies if provided
+        if cookies:
+            if isinstance(cookies, str) and os.path.exists(cookies):
+                # Load cookies from file
+                with open(cookies, 'r') as f:
+                    cookies_dict = json.load(f)
+            elif isinstance(cookies, dict):
+                cookies_dict = cookies
+            else:
+                cookies_dict = None
+        else:
+            cookies_dict = None
+            
+        result = requests.get(url, params=params, proxies=proxies, cookies=cookies_dict)
+        if result.status_code != 200:
+            raise Exception(f'Failed to get transcript info: HTTP {result.status_code}')
+            
+        return result.text
 
 
 def extract_video_id(video_url):
@@ -11,7 +47,7 @@ def extract_video_id(video_url):
     Extracts the video ID from a YouTube video URL.
     """
     try:
-        # Clean the URL in case it contains mixed formats or multiple URLs
+        # Clean the URL in case it contains mixed formats or additional parameters
         video_url = video_url.strip()
         
         # Handle URLs with playlist parameter or additional parameters
@@ -22,7 +58,7 @@ def extract_video_id(video_url):
         if parsed_url.netloc not in ['www.youtube.com', 'youtube.com', 'm.youtube.com', 'youtu.be']:
             return None
         if parsed_url.netloc in ['youtu.be']:
-            return parsed_url.path[1:]
+            return parsed_url.path[1:].split('?')[0]  # Remove query params from youtu.be URLs
         if parsed_url.query:
             query_params = parse_qs(parsed_url.query)
             video_ids = query_params.get('v')
@@ -34,10 +70,9 @@ def extract_video_id(video_url):
         return None
 
 
-def get_youtube_transcript(video_url):
+def get_youtube_transcript(video_url, use_cookies=True, language_preference=None):
     """
-    Extracts the transcript from a YouTube video with better error handling.
-    Returns: tuple: (bool, str, str) - Success, transcript text, video ID (for error messages)
+    Extracts the transcript from a YouTube video with better error handling and cookie support.
     """
     video_id = extract_video_id(video_url)
     if not video_id:
@@ -45,24 +80,46 @@ def get_youtube_transcript(video_url):
         return False, error_message, video_id
 
     try:
-        # First try to get English transcript
-        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+        # Use custom fetcher with cookies if requested
+        fetcher = CustomTranscriptListFetcher() if use_cookies else None
+        
+        # Prepare language list - try user preference first, then English, then any
+        languages = []
+        if language_preference:
+            languages.append(language_preference)
+        if 'en' not in languages:
+            languages.append('en')
+            
+        transcript_list = YouTubeTranscriptApi._get_transcript_list(
+            video_id, 
+            fetcher=fetcher,
+            cookies={} if use_cookies else None  # Pass empty dict to enable cookies but not restrict to specific ones
+        )
+        
+        # Try to get transcript in preferred language(s) first
+        try:
+            if languages:
+                transcript = transcript_list.find_transcript(languages)
+            else:
+                # If no language preference, get the first available transcript
+                transcript = transcript_list.find_transcript([])
+        except NoTranscriptFound:
+            # If preferred languages not found, try any language
+            transcript = transcript_list.find_transcript([])
+            
+        transcript_data = transcript.fetch()
         transcript_text = ""
-        for segment in transcript:
+        for segment in transcript_data:
             transcript_text += segment['text'] + " "
-        return True, transcript_text, video_id
+            
+        # Add source language information to the transcript
+        source_language = transcript.language_code
+        transcript_header = f"# Transcript (Source language: {source_language})\n\n"
+        return True, transcript_header + transcript_text, video_id
 
     except NoTranscriptFound:
-        try:
-            # If English transcript is not available, try getting any available transcript
-            transcript = YouTubeTranscriptApi.get_transcript(video_id)
-            transcript_text = ""
-            for segment in transcript:
-                transcript_text += segment['text'] + " "
-            return True, transcript_text, video_id
-        except Exception as e:
-            error_message = f"Error extracting transcript for video ID: '{video_id}': {e}"
-            return False, error_message, video_id
+        error_message = f"No transcript available for video ID: '{video_id}'"
+        return False, error_message, video_id
             
     except TranscriptsDisabled:
         error_message = f"Transcripts are disabled for video ID: '{video_id}'"
@@ -122,6 +179,12 @@ def main():
         "Enter Desired Filenames (one per line, corresponding to URLs - optional):",
         placeholder="video1_name\nvideo2_name"
     )
+    
+    # Advanced options in expander
+    with st.expander("Advanced Options"):
+        use_cookies = st.checkbox("Use Cookie Support (helps with restricted videos)", value=True)
+        language_preference = st.text_input("Preferred Language Code (leave empty for English or any available)", 
+                                           placeholder="es, fr, de, ja, etc.")
 
     if st.button("Extract and Download Transcripts"):
         video_urls = parse_video_urls(video_urls_input)
@@ -148,7 +211,11 @@ def main():
                 output_filename = f"{output_filename_base_sanitized}.txt"
 
                 with st.spinner(f"Extracting transcript for: {video_url}"):
-                    success, transcript_text, video_id = get_youtube_transcript(video_url)
+                    success, transcript_text, video_id = get_youtube_transcript(
+                        video_url, 
+                        use_cookies=use_cookies,
+                        language_preference=language_preference if language_preference else None
+                    )
                     
                     if success:
                         success_count += 1
