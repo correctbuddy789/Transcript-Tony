@@ -163,7 +163,7 @@ def main():
 
     st.title("Tony the YouTube Transcript Extractor")
     st.markdown("""
-    Extract transcripts from YouTube videos. Enter one or more YouTube URLs below.
+    Extract transcripts from YouTube videos. Enter one or more YouTube URLs below Built @ Grapevine.
     """)
 
     url_input = st.text_area(
