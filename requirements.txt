@@ -5,8 +5,6 @@ cachetools==5.5.1
 certifi==2025.1.31
 charset-normalizer==3.4.1
 click==8.1.8
-colorama==0.4.6
-defusedxml==0.7.1
 gitdb==4.0.12
 GitPython==3.1.44
 idna==3.10
@@ -26,6 +24,7 @@ pyarrow==19.0.1
 pydeck==0.9.1
 Pygments==2.19.1
 python-dateutil==2.9.0.post0
+pytube==15.0.0
 pytz==2025.1
 referencing==0.36.2
 requests==2.32.3
@@ -40,5 +39,3 @@ tornado==6.4.2
 typing_extensions==4.12.2
 tzdata==2025.1
 urllib3==2.3.0
-watchdog==6.0.0
-youtube-transcript-api==0.6.3
