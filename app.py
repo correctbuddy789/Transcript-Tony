@@ -1,318 +1,311 @@
 import streamlit as st
-from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
-from urllib.parse import urlparse, parse_qs
+import re
+from pytube import YouTube
+import os
 import zipfile
 import io
-import re
-import json
-import os
+from urllib.parse import urlparse, parse_qs
+import xml.etree.ElementTree as ET
 import requests
+import json
 
-def extract_video_id(video_url):
-    """
-    Extracts the video ID from a YouTube video URL.
-    """
-    try:
-        # Clean the URL in case it contains mixed formats or additional parameters
-        video_url = video_url.strip()
-        
-        # Handle URLs with playlist parameter or additional parameters
-        if '&' in video_url:
-            video_url = video_url.split('&')[0]
-            
-        parsed_url = urlparse(video_url)
-        if parsed_url.netloc not in ['www.youtube.com', 'youtube.com', 'm.youtube.com', 'youtu.be']:
-            return None
-        if parsed_url.netloc in ['youtu.be']:
-            return parsed_url.path[1:].split('?')[0]  # Remove query params from youtu.be URLs
-        if parsed_url.query:
-            query_params = parse_qs(parsed_url.query)
-            video_ids = query_params.get('v')
-            if video_ids:
-                return video_ids[0]
+
+def extract_video_id(url):
+    """Extract YouTube video ID from various URL formats"""
+    if not url:
         return None
-    except Exception as e:
-        st.error(f"Error parsing URL '{video_url}': {e}")
-        return None
-
-
-def get_youtube_transcript(video_url, language_preference=None):
-    """
-    Extracts the transcript from a YouTube video with better error handling.
-    Uses direct API calls without custom fetcher.
-    """
-    video_id = extract_video_id(video_url)
-    if not video_id:
-        error_message = f"Error: Could not extract video ID from the provided URL: '{video_url}'"
-        return False, error_message, video_id
-
-    try:
-        # Try to get transcript with specific languages
-        languages = []
-        if language_preference:
-            languages.append(language_preference)
-        if 'en' not in languages:
-            languages.append('en')
-            
-        try:
-            # First try with specified languages
-            if languages:
-                transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
-            else:
-                # Fall back to default language
-                transcript = YouTubeTranscriptApi.get_transcript(video_id)
-                
-        except NoTranscriptFound:
-            # If preferred languages not found, try any language
-            transcript = YouTubeTranscriptApi.get_transcript(video_id)
-            
-        transcript_text = ""
-        for segment in transcript:
-            transcript_text += segment['text'] + " "
-            
-        return True, transcript_text, video_id
-
-    except NoTranscriptFound:
-        # Try fallback method - get list of available transcripts first
-        try:
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-            available_transcript = transcript_list.find_generated_transcript(languages=['en']) or \
-                                  transcript_list.find_generated_transcript(languages=[]) or \
-                                  transcript_list.find_manually_created_transcript(languages=['en']) or \
-                                  transcript_list.find_manually_created_transcript(languages=[])
-            
-            if available_transcript:
-                transcript_data = available_transcript.fetch()
-                transcript_text = ""
-                for segment in transcript_data:
-                    transcript_text += segment['text'] + " "
-                return True, transcript_text, video_id
-            else:
-                error_message = f"No transcript available for video ID: '{video_id}'"
-                return False, error_message, video_id
-                
-        except Exception as e:
-            error_message = f"No transcript available for video ID: '{video_id}' (Fallback failed: {str(e)})"
-            return False, error_message, video_id
-            
-    except TranscriptsDisabled:
-        # Try to get an automatically generated transcript as fallback
-        try:
-            # Try using list_transcripts which can sometimes access auto-generated ones
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-            auto_transcript = next((t for t in transcript_list if t.is_generated), None)
-            
-            if auto_transcript:
-                transcript_data = auto_transcript.fetch()
-                transcript_text = ""
-                for segment in transcript_data:
-                    transcript_text += segment['text'] + " "
-                return True, transcript_text, video_id
-            else:
-                error_message = f"Transcripts are disabled for video ID: '{video_id}'"
-                return False, error_message, video_id
-                
-        except Exception:
-            error_message = f"Transcripts are disabled for video ID: '{video_id}'"
-            return False, error_message, video_id
         
-    except Exception as e:
-        error_message = f"Error extracting transcript for video ID: '{video_id}': {e}"
-        return False, error_message, video_id
+    url = url.strip()
+    
+    # Handle youtu.be short links
+    if 'youtu.be' in url:
+        parts = url.split('/')
+        for part in parts:
+            if part and 'youtu.be' not in part and '?' not in part:
+                return part.split('?')[0]
+    
+    # Handle youtube.com links
+    parsed_url = urlparse(url)
+    if 'youtube.com' in parsed_url.netloc:
+        if '/watch' in parsed_url.path:
+            query = parse_qs(parsed_url.query)
+            return query.get('v', [None])[0]
+        elif '/embed/' in parsed_url.path or '/v/' in parsed_url.path:
+            path_parts = parsed_url.path.split('/')
+            return path_parts[-1]
+            
+    return None
 
 
-def try_alternative_transcript_method(video_id):
-    """
-    Alternative method to get transcripts by directly accessing YouTube's API.
-    """
+def get_captions_from_pytube(video_id):
+    """Try to get captions using PyTube"""
     try:
-        # Try to directly use requests to fetch transcript data
+        yt = YouTube(f"https://www.youtube.com/watch?v={video_id}")
+        captions = yt.captions
+        
+        if not captions or len(captions.all()) == 0:
+            return False, "No captions available for this video"
+            
+        # Try to get English captions first
+        caption_track = None
+        
+        # First try to get English
+        for track in captions.all():
+            if track.code.startswith(('en', 'a.en')):
+                caption_track = track
+                break
+                
+        # If no English, take any available caption
+        if caption_track is None and captions.all():
+            caption_track = captions.all()[0]
+            
+        if caption_track:
+            transcript = caption_track.generate_srt_captions()
+            # Convert SRT to plain text
+            clean_text = re.sub(r'\d+\s+\d+:\d+:\d+,\d+ --> \d+:\d+:\d+,\d+\s+', '', transcript)
+            clean_text = re.sub(r'\n\n', ' ', clean_text)
+            return True, clean_text
+        else:
+            return False, "No suitable captions found"
+            
+    except Exception as e:
+        return False, f"Error with PyTube: {str(e)}"
+
+
+def get_captions_from_api(video_id):
+    """Try to get captions using direct API access"""
+    try:
+        # First try to get a list of available caption tracks
         session = requests.Session()
-        response = session.get(f"https://www.youtube.com/watch?v={video_id}")
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
+        response = session.get(video_url)
         
         if response.status_code != 200:
-            return False, f"Could not access video page, status code: {response.status_code}"
-            
-        # This is experimental and might need adjustments based on YouTube's API changes
+            return False, f"Failed to access video page (status code: {response.status_code})"
+        
+        # Try to extract caption track info from the response
         try:
-            transcript_url = f"https://www.youtube.com/api/timedtext?v={video_id}&lang=en"
-            transcript_response = session.get(transcript_url)
+            # First check for English auto-generated captions
+            caption_url = f"https://www.youtube.com/api/timedtext?v={video_id}&lang=en"
+            caption_response = session.get(caption_url)
             
-            if transcript_response.status_code == 200 and transcript_response.text:
-                return True, "Successfully retrieved transcript using alternative method"
-            else:
-                return False, "Alternative transcript method failed"
+            if caption_response.status_code == 200 and caption_response.text:
+                # Parse the XML
+                try:
+                    root = ET.fromstring(caption_response.text)
+                    transcript_text = " ".join([elem.text for elem in root.findall(".//text") if elem.text])
+                    if transcript_text:
+                        return True, transcript_text
+                except Exception:
+                    pass
+            
+            # Try to extract the serializedShareEntity which sometimes contains caption URLs
+            data_pattern = r'(?:"captionTracks":(\[.*?\])|"playerCaptionsTracklistRenderer":.*?(\[.*?\]))'
+            matches = re.findall(data_pattern, response.text)
+            
+            caption_data = None
+            for match_group in matches:
+                for match in match_group:
+                    if match:
+                        try:
+                            caption_data = json.loads(match)
+                            break
+                        except:
+                            continue
+                if caption_data:
+                    break
+                    
+            if not caption_data:
+                return False, "No caption data found in video page"
                 
+            # Extract the first available caption URL
+            caption_url = None
+            for track in caption_data:
+                if "baseUrl" in track:
+                    caption_url = track["baseUrl"]
+                    break
+                    
+            if not caption_url:
+                return False, "No caption URL found in video data"
+                
+            # Get the captions
+            caption_response = session.get(caption_url)
+            if caption_response.status_code != 200:
+                return False, f"Failed to get captions (status code: {caption_response.status_code})"
+                
+            # Parse the XML
+            try:
+                root = ET.fromstring(caption_response.text)
+                transcript_text = " ".join([elem.text for elem in root.findall(".//text") if elem.text])
+                return True, transcript_text
+            except Exception as xml_err:
+                return False, f"Failed to parse caption XML: {str(xml_err)}"
+        
         except Exception as e:
-            return False, f"Alternative transcript fetch failed: {str(e)}"
+            return False, f"API extraction error: {str(e)}"
             
     except Exception as e:
-        return False, f"Alternative method failed: {str(e)}"
+        return False, f"General API error: {str(e)}"
 
 
-def sanitize_filename(filename):
-    """
-    Sanitizes a filename by removing or replacing invalid characters.
-    """
-    filename = filename.strip()
-    filename = re.sub(r'[\\/*?:"<>|]', '', filename)  # Remove invalid characters
-    filename = filename.replace(" ", "_")  # Replace spaces with underscores
-    if not filename:
-        filename = "transcript_file"  # Default if filename becomes empty
-    return filename
-
-
-def parse_video_urls(input_text):
-    """
-    Parse a text area input that might contain multiple URLs in different formats.
-    Returns a list of cleaned, individual URLs.
-    """
-    # First split by common line break characters
-    lines = re.split(r'[\n\r]+', input_text.strip())
-    
-    urls = []
-    for line in lines:
-        # Split by common URL starts to handle cases where URLs are concatenated
-        potential_urls = re.split(r'(https?://)', line)
+def sanitize_filename(name):
+    """Create a safe filename from any input string"""
+    if not name:
+        return "transcript"
         
-        for i, part in enumerate(potential_urls):
-            if part.lower() in ['http://', 'https://']:
-                if i+1 < len(potential_urls):
-                    urls.append(f"{part}{potential_urls[i+1]}")
-    
-    # If no URLs were found with the method above, try a more direct regex approach
-    if not urls:
-        urls = re.findall(r'(https?://[^\s]+)', input_text)
-    
-    return [url.strip() for url in urls if url.strip()]
+    # Remove illegal characters
+    name = re.sub(r'[\\/*?:"<>|]', "", name)
+    # Replace spaces with underscores
+    name = name.replace(" ", "_")
+    # Ensure it's not too long
+    name = name[:100]
+    # Ensure we have a name
+    return name if name else "transcript"
 
 
 def main():
+    st.set_page_config(page_title="YouTube Transcript Extractor", page_icon="📝")
+    
     st.title("YouTube Transcript Extractor")
-    st.markdown("Enter YouTube video URLs and desired filenames (optional) to extract transcripts.")
-
-    video_urls_input = st.text_area(
-        "Enter YouTube Video URLs (one per line):",
-        placeholder="https://www.youtube.com/watch?v=dQw4w9WgXcQ\nhttps://www.youtube.com/watch?v=another_video_id"
-    )
-    filenames_input = st.text_area(
-        "Enter Desired Filenames (one per line, corresponding to URLs - optional):",
-        placeholder="video1_name\nvideo2_name"
+    st.markdown("""
+    Extract transcripts from YouTube videos. Enter one or more YouTube URLs below.
+    """)
+    
+    url_input = st.text_area(
+        "YouTube Video URLs (one per line):",
+        placeholder="https://www.youtube.com/watch?v=dQw4w9WgXcQ\nhttps://youtu.be/anothervideoID"
     )
     
-    # Advanced options in expander
+    name_input = st.text_area(
+        "Custom Filenames (optional, one per line):",
+        placeholder="video_one\nvideo_two"
+    )
+    
     with st.expander("Advanced Options"):
-        language_preference = st.text_input("Preferred Language Code (leave empty for English or any available)", 
-                                           placeholder="es, fr, de, ja, etc.")
-        use_browser = st.checkbox("Experimental: Try to fetch from HTML (may work with some restricted videos)", value=False)
-
-    if st.button("Extract and Download Transcripts"):
-        video_urls = parse_video_urls(video_urls_input)
-        filenames = [name.strip() for name in filenames_input.strip().split('\n') if name.strip()]
-
-        if not video_urls:
-            st.warning("Please enter at least one valid YouTube video URL.")
+        extraction_method = st.radio(
+            "Extraction Method",
+            ["Auto (try all methods)", "PyTube", "Direct API Access"],
+            index=0
+        )
+    
+    if st.button("Extract Transcripts"):
+        if not url_input.strip():
+            st.warning("Please enter at least one YouTube URL.")
+            return
+            
+        # Process URLs
+        urls = [url.strip() for url in url_input.strip().split('\n') if url.strip()]
+        names = [name.strip() for name in name_input.strip().split('\n') if name.strip()]
+        
+        st.info(f"Processing {len(urls)} video(s)...")
+        
+        # Use session state to store results
+        if 'results' not in st.session_state:
+            st.session_state.results = []
         else:
-            st.info(f"Found {len(video_urls)} URLs to process")
+            st.session_state.results = []
             
-            # Display the parsed URLs so the user can verify
-            with st.expander("Show detected URLs"):
-                for i, url in enumerate(video_urls):
-                    st.write(f"{i+1}. {url}")
+        success_count = 0
+        fail_count = 0
+        
+        for i, url in enumerate(urls):
+            # Get filename
+            custom_name = names[i] if i < len(names) else f"video_{i+1}"
+            sanitized_name = sanitize_filename(custom_name)
+            filename = f"{sanitized_name}.txt"
             
-            # Version info
-            st.info(f"Using youtube-transcript-api version: {YouTubeTranscriptApi.__version__ if hasattr(YouTubeTranscriptApi, '__version__') else 'Unknown'}")
+            # Extract video ID
+            video_id = extract_video_id(url)
+            if not video_id:
+                st.error(f"❌ Could not extract video ID from URL: {url}")
+                fail_count += 1
+                continue
+                
+            st.markdown(f"### Processing: {url}")
+            st.write(f"Video ID: {video_id}")
             
-            transcripts_data = []  # List to store (filename, transcript_text) tuples
-            success_count = 0
-            failure_count = 0
-
-            for i, video_url in enumerate(video_urls):
-                default_filename = f"transcript_{i+1}"
-                output_filename_base = filenames[i] if i < len(filenames) else default_filename
-                output_filename_base_sanitized = sanitize_filename(output_filename_base)
-                output_filename = f"{output_filename_base_sanitized}.txt"
-
-                with st.spinner(f"Extracting transcript for: {video_url}"):
-                    success, transcript_text, video_id = get_youtube_transcript(
-                        video_url, 
-                        language_preference=language_preference if language_preference else None
-                    )
-                    
-                    # If standard method failed and experimental is enabled, try the alternative
-                    if not success and use_browser and video_id:
-                        st.warning(f"Standard extraction failed for {video_url}, trying experimental method...")
-                        alt_success, alt_message = try_alternative_transcript_method(video_id)
-                        if alt_success:
-                            st.success(f"Experimental method succeeded: {alt_message}")
-                            # Re-try with standard method after priming with browser access
-                            success, transcript_text, _ = get_youtube_transcript(video_url)
-                    
-                    if success:
-                        success_count += 1
-                        transcripts_data.append((output_filename, transcript_text))
-                        st.markdown(f"✅ **Video {i+1}: {video_url}** (saved as `{output_filename}`)")
-                        st.code(transcript_text[:500] + "..." if len(transcript_text) > 500 else transcript_text, language=None)
-                        st.download_button(
-                            label=f"Download Transcript {i+1}",
-                            data=transcript_text,
-                            file_name=output_filename,
-                            mime="text/plain"
-                        )
-                    else:
-                        failure_count += 1
-                        st.markdown(f"❌ **Video {i+1}: {video_url}**")
-                        st.error(transcript_text)  # Display the error message
-                        
-                        # Provide more information about the video if extraction failed
-                        if video_id:
-                            st.info(f"Video ID: {video_id}")
-                            st.markdown(f"This video may have restricted transcripts or doesn't have any available transcripts.")
-                    
-                    st.write("-" * 30)
-
-            # Summary statistics
-            st.write(f"### Summary: {success_count} succeeded, {failure_count} failed")
+            # Extract transcript based on selected method
+            success = False
+            transcript = ""
+            error_msg = ""
             
-            if transcripts_data:  # If at least one transcript was extracted
-                # Create Download All button
-                zip_buffer = io.BytesIO()
-                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-                    for filename, transcript_text in transcripts_data:
-                        zip_file.writestr(filename, transcript_text)
-                zip_buffer.seek(0)  # Reset buffer to beginning for download
-
+            if extraction_method in ["Auto (try all methods)", "PyTube"]:
+                st.write("Trying PyTube extraction...")
+                success, result = get_captions_from_pytube(video_id)
+                if success:
+                    transcript = result
+                else:
+                    error_msg = result
+                    if extraction_method == "PyTube":
+                        st.error(f"❌ PyTube extraction failed: {error_msg}")
+            
+            if not success and extraction_method in ["Auto (try all methods)", "Direct API Access"]:
+                st.write("Trying Direct API extraction...")
+                success, result = get_captions_from_api(video_id)
+                if success:
+                    transcript = result
+                else:
+                    error_msg = result
+                    if extraction_method == "Direct API Access" or extraction_method == "Auto (try all methods)":
+                        st.error(f"❌ API extraction failed: {error_msg}")
+            
+            # Display results
+            if success:
+                success_count += 1
+                st.success(f"✅ Successfully extracted transcript for {url}")
+                st.session_state.results.append((filename, transcript, video_id))
+                
+                with st.expander("Preview Transcript"):
+                    st.code(transcript[:1000] + ("..." if len(transcript) > 1000 else ""))
+                
                 st.download_button(
-                    label=f"Download All {success_count} Transcripts as ZIP",
-                    data=zip_buffer,
-                    file_name="transcripts.zip",
-                    mime="application/zip"
+                    label=f"Download {filename}",
+                    data=transcript,
+                    file_name=filename,
+                    mime="text/plain"
                 )
+            else:
+                fail_count += 1
+                st.error(f"❌ Failed to extract transcript for {url}")
+                st.write(f"Reason: {error_msg}")
             
-            # Troubleshooting information
-            if failure_count > 0:
-                st.markdown("""
-                ## Why This Might Be Happening
-                
-                1. **No Available Transcripts**: Some YouTube videos don't have any transcripts available.
-                2. **Owner Restrictions**: The video owner may have disabled transcript access.
-                3. **Authentication Required**: Some videos require you to be logged in to access transcripts.
-                4. **Geo-restrictions**: Transcript availability can vary by region.
-                
-                ### Using This App Locally
-                If you've confirmed that transcripts work locally but not on Streamlit Cloud:
-                
-                ```python
-                # Install dependencies
-                pip install streamlit youtube-transcript-api
-                
-                # Save this app as app.py and run
-                streamlit run app.py
-                ```
-                
-                When running locally, your browser's cookies may allow access to transcripts that are restricted on Streamlit Cloud.
-                """)
+            st.markdown("---")
+        
+        # Summary
+        st.markdown(f"## Summary: {success_count} succeeded, {fail_count} failed")
+        
+        # Create ZIP download if we have results
+        if st.session_state.results:
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                for file_name, content, _ in st.session_state.results:
+                    zip_file.writestr(file_name, content)
+            zip_buffer.seek(0)
+            
+            st.download_button(
+                label=f"Download All Transcripts ({success_count})",
+                data=zip_buffer,
+                file_name="youtube_transcripts.zip",
+                mime="application/zip"
+            )
+        
+        # Display troubleshooting info if any failures
+        if fail_count > 0:
+            st.markdown("""
+            ## Troubleshooting
+            
+            If transcripts are failing to extract, consider:
+            
+            1. **Privacy Restrictions**: Some videos have disabled captions/transcripts
+            2. **Regional Restrictions**: Some videos may not be available with captions in your region
+            3. **Authentication**: When running locally, your browser authentication might allow access to more transcripts
+            
+            For reliable extraction of transcripts from videos with restrictions, consider:
+            - Running this app locally (where your browser cookies can be used)
+            - Using third-party services that can download videos with captions
+            """)
 
 
-if __name__ == "__main__":
+# Install requirements: streamlit pytube requests
+if __name__ == '__main__':
     main()
