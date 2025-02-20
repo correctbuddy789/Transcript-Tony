@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 import requests
 import json
 import zipfile
-import math  # Import the math module
+import math
 
 
 def extract_video_id(url):
@@ -22,7 +22,7 @@ def extract_video_id(url):
         # Handle youtu.be short links
         path = parsed_url.path.lstrip('/')
         video_id = path.split('?')[0]  # Split on '?' and take the first part
-        video_id = video_id.split('/')[0] #Take first part incase there is any '/'
+        video_id = video_id.split('/')[0]  # Take first part in case there is any '/'
         return video_id
 
     elif 'youtube.com' in parsed_url.netloc:
@@ -40,7 +40,6 @@ def extract_video_id(url):
             path_parts = parsed_url.path.split('/')
             return path_parts[-1]
     return None
-
 
 
 def get_captions_from_pytube(video_id):
@@ -195,7 +194,7 @@ def main():
         )
 
     success_count = 0  # Initialize outside the if block
-    fail_count = 0     # Initialize outside the if block
+    fail_count = 0  # Initialize outside the if block
 
     if st.button("Extract Transcripts"):
         if not url_input.strip():
@@ -213,15 +212,12 @@ def main():
 
         st.info(f"Processing {len(urls)} video(s)...")
 
-        # Use session state to store results
+        # --- Correct Session State Handling ---
         if 'results' not in st.session_state:
-            st.session_state.results = []
-        # --- Clear results on new extraction ---
+            st.session_state.results = []  # Initialize ONLY if it doesn't exist
         else:
-            st.session_state.results = [] # Clear previous results.  IMPORTANT!
-        # ---------------------------------------
-
-
+            st.session_state.results = []  # Clear previous results.
+        # --------------------------------------
 
         for i, url in enumerate(urls):
             # Get filename
@@ -295,8 +291,7 @@ def main():
         # Summary
         st.markdown(f"## Summary: {success_count} succeeded, {fail_count} failed")
 
-
-    # --- Chunked Downloads (OUTSIDE the loop) ---
+    # --- Download All (OUTSIDE the loop) ---
     if st.session_state.get('results'):
         chunk_size = 25  # Number of transcripts per ZIP file.  Adjust as needed.
         num_chunks = math.ceil(len(st.session_state.results) / chunk_size)
@@ -309,4 +304,33 @@ def main():
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
                 for file_name, content, _ in chunk:
-                    zip
+                    zip_file.writestr(file_name, content)
+            zip_buffer.seek(0)
+
+            st.download_button(
+                label=f"Download Transcripts (Part {i + 1} of {num_chunks})",
+                data=zip_buffer,
+                file_name=f"youtube_transcripts_part_{i + 1}.zip",
+                mime="application/zip",
+                key=f"download_all_part_{i}"  # Unique key for each chunk
+            )
+
+    # --- (Troubleshooting section remains unchanged) ---
+    if fail_count > 0:
+        st.markdown("""
+        ## Troubleshooting
+
+        If transcripts are failing to extract, consider:
+
+        1.  **Privacy Restrictions**: Some videos have disabled captions/transcripts
+        2.  **Regional Restrictions**: Some videos may not be available with captions in your region
+        3.  **Authentication**: When running locally, your browser authentication might allow access to more transcripts
+
+        For reliable extraction of transcripts from videos with restrictions, consider:
+        - Running this app locally (where your browser cookies can be used)
+        - Using third-party services that can download videos with captions
+        """)
+
+
+if __name__ == '__main__':
+    main()
