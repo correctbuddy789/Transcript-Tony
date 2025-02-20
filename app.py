@@ -161,7 +161,7 @@ def sanitize_filename(name):
 def main():
     st.set_page_config(page_title="Tony the YouTube Transcript Extractor", page_icon="📝")
 
-    st.title("YouTube Transcript Extractor")
+    st.title("Tony the YouTube Transcript Extractor")
     st.markdown("""
     Extract transcripts from YouTube videos. Enter one or more YouTube URLs below.
     """)
